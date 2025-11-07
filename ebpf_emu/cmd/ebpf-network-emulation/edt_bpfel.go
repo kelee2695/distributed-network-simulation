@@ -13,6 +13,11 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type edtFlowKey struct {
+	Ifindex uint32
+	SrcMac  [6]uint8
+}
+
 type edtHandleBpsDelay struct {
 	TcHandle        uint32
 	ThrottleRateBps uint32
@@ -68,9 +73,9 @@ type edtProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type edtMapSpecs struct {
-	IP_HANDLE_BPS_DELAY *ebpf.MapSpec `ebpf:"IP_HANDLE_BPS_DELAY"`
-	FlowMap             *ebpf.MapSpec `ebpf:"flow_map"`
-	Progs               *ebpf.MapSpec `ebpf:"progs"`
+	MAC_HANDLE_BPS_DELAY *ebpf.MapSpec `ebpf:"MAC_HANDLE_BPS_DELAY"`
+	FlowMap              *ebpf.MapSpec `ebpf:"flow_map"`
+	Progs                *ebpf.MapSpec `ebpf:"progs"`
 }
 
 // edtObjects contains all objects after they have been loaded into the kernel.
@@ -92,14 +97,14 @@ func (o *edtObjects) Close() error {
 //
 // It can be passed to loadEdtObjects or ebpf.CollectionSpec.LoadAndAssign.
 type edtMaps struct {
-	IP_HANDLE_BPS_DELAY *ebpf.Map `ebpf:"IP_HANDLE_BPS_DELAY"`
-	FlowMap             *ebpf.Map `ebpf:"flow_map"`
-	Progs               *ebpf.Map `ebpf:"progs"`
+	MAC_HANDLE_BPS_DELAY *ebpf.Map `ebpf:"MAC_HANDLE_BPS_DELAY"`
+	FlowMap              *ebpf.Map `ebpf:"flow_map"`
+	Progs                *ebpf.Map `ebpf:"progs"`
 }
 
 func (m *edtMaps) Close() error {
 	return _EdtClose(
-		m.IP_HANDLE_BPS_DELAY,
+		m.MAC_HANDLE_BPS_DELAY,
 		m.FlowMap,
 		m.Progs,
 	)

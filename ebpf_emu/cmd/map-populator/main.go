@@ -1,15 +1,20 @@
 package main
 
 import (
-	"bytes"
-	"encoding/binary"
 	"flag"
 	"fmt"
 	"net"
 	"os"
 
 	"github.com/cilium/ebpf"
+	"github.com/vishvananda/netlink"
 )
+
+// 复合键结构体：对应C代码中的flow_key
+type flowKey struct {
+	Ifindex  uint32  // 网卡接口索引
+	SrcMac   [6]byte // 源MAC地址
+}
 
 // HANDLE_BPS map value struct
 type handleBpsDelay struct {
@@ -18,22 +23,26 @@ type handleBpsDelay struct {
 	DelayMs         uint32
 }
 
-// parseIp parses IP address from string into uint32 (with reversed order)
-func parseIpToLong(ip string) uint32 {
-	var long uint32
-	binary.Read(bytes.NewBuffer(net.ParseIP(ip).To4()), binary.LittleEndian, &long)
-	return long
+// parseMacToBytes parses MAC address from string into byte array
+func parseMacToBytes(mac string) ([]byte, error) {
+	macAddr, err := net.ParseMAC(mac)
+	if err != nil {
+		return nil, err
+	}
+	// 确保是6字节的MAC地址
+	if len(macAddr) < 6 {
+		return nil, fmt.Errorf("invalid MAC address length")
+	}
+	return macAddr[:6], nil
 }
 
-// parseLongToIp parses uint32 IP address back to string format
-func parseLongToIp(ipLong uint32) string {
-	buffer := new(bytes.Buffer)
-	err := binary.Write(buffer, binary.LittleEndian, ipLong)
-	if err != nil {
-		return "invalid_ip"
+// parseBytesToMac parses byte array back to MAC address string format
+func parseBytesToMac(macBytes []byte) string {
+	if len(macBytes) < 6 {
+		return "invalid_mac"
 	}
-	ip := net.IP(buffer.Bytes()).String()
-	return ip
+	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", 
+		macBytes[0], macBytes[1], macBytes[2], macBytes[3], macBytes[4], macBytes[5])
 }
 
 // printMap iterates through the eBPF map and prints all entries
@@ -42,19 +51,19 @@ func printMap(ebpfMap *ebpf.Map) {
 
 	// Create an iterator for the map
 	iter := ebpfMap.Iterate()
-	var key uint32
+	var key flowKey // 使用复合键
 	var value handleBpsDelay
 
 	// Print table header
-	fmt.Println("\nIP Address\t\tTC Handle\tBandwidth (Mbps)\tDelay (ms)")
-	fmt.Println("-----------------------------------------------------------")
+	fmt.Println("\nInterface Index\tMAC Address\t\tTC Handle\tBandwidth (Mbps)\tDelay (ms)")
+	fmt.Println("----------------------------------------------------------------------------")
 
 	// Iterate through all entries
 	for iter.Next(&key, &value) {
 		count++
-		ip := parseLongToIp(key)
+		mac := parseBytesToMac(key.SrcMac[:])
 		bandwidthMbps := float64(value.ThrottleRateBps) / 1000000.0
-		fmt.Printf("%s\t\t0x%x\t\t%.2f\t\t%d\n", ip, value.TcHandle, bandwidthMbps, value.DelayMs)
+		fmt.Printf("%d\t\t%s\t\t0x%x\t\t%.2f\t\t%d\n", key.Ifindex, mac, value.TcHandle, bandwidthMbps, value.DelayMs)
 	}
 
 	// Check for iteration errors
@@ -71,13 +80,14 @@ func clearMap(ebpfMap *ebpf.Map) error {
 
 	// Create an iterator for the map
 	iter := ebpfMap.Iterate()
-	var key uint32
+	var key flowKey // 使用复合键
 	var value handleBpsDelay
 
 	// Iterate through all entries and delete them
 	for iter.Next(&key, &value) {
 		if err := ebpfMap.Delete(key); err != nil {
-			return fmt.Errorf("error deleting key %d: %v", key, err)
+			return fmt.Errorf("error deleting entry for ifindex %d, MAC %s: %v", 
+				key.Ifindex, parseBytesToMac(key.SrcMac[:]), err)
 		}
 		count++
 	}
@@ -91,10 +101,33 @@ func clearMap(ebpfMap *ebpf.Map) error {
 	return nil
 }
 
+// getInterfaceIndex 获取网卡接口索引
+func getInterfaceIndex(ifname string) (uint32, error) {
+	link, err := netlink.LinkByName(ifname)
+	if err != nil {
+		return 0, fmt.Errorf("interface %s not found: %v", ifname, err)
+	}
+	return uint32(link.Attrs().Index), nil
+}
+
 // addMapEntry adds a single entry to the eBPF map
-func addMapEntry(ebpfMap *ebpf.Map, ip string, tcHandle uint32, throttleRateBps uint32, delayMs uint32) error {
-	// Convert IP to long format
-	key := parseIpToLong(ip)
+func addMapEntry(ebpfMap *ebpf.Map, ifname string, mac string, tcHandle uint32, throttleRateBps uint32, delayMs uint32) error {
+	// 获取网卡接口索引
+	ifindex, err := getInterfaceIndex(ifname)
+	if err != nil {
+		return err
+	}
+	
+	// Convert MAC to byte array
+	keyBytes, err := parseMacToBytes(mac)
+	if err != nil {
+		return fmt.Errorf("invalid MAC address %s: %v", mac, err)
+	}
+	
+	// Create composite key
+	var key flowKey
+	key.Ifindex = ifindex
+	copy(key.SrcMac[:], keyBytes)
 	
 	// Create value struct
 	value := handleBpsDelay{
@@ -105,11 +138,11 @@ func addMapEntry(ebpfMap *ebpf.Map, ip string, tcHandle uint32, throttleRateBps 
 	
 	// Update the map
 	if err := ebpfMap.Put(key, value); err != nil {
-		return fmt.Errorf("error adding entry for IP %s: %v", ip, err)
+		return fmt.Errorf("error adding entry for ifindex %d, MAC %s: %v", ifindex, mac, err)
 	}
 	
-	fmt.Printf("Successfully added entry for IP %s (TC: 0x%x, Bandwidth: %.2f Mbps, Delay: %d ms)\n",
-		ip, tcHandle, float64(throttleRateBps)/1000000.0, delayMs)
+	fmt.Printf("Successfully added entry for ifindex %d, MAC %s (TC: 0x%x, Bandwidth: %.2f Mbps, Delay: %d ms)\n",
+		ifindex, mac, tcHandle, float64(throttleRateBps)/1000000.0, delayMs)
 	return nil
 }
 
@@ -119,14 +152,16 @@ func main() {
 	var unpinMap bool
 	
 	// 添加条目参数
-	var ip string
+	var ifname string
+	var mac string
 	var tcHandle uint
 	var bandwidthMbps uint
 	var delayMs uint
 
 	flag.StringVar(&mode, "mode", "view", "Operation mode: view (查看表), clear (清空表), add (添加表)")
 	flag.BoolVar(&unpinMap, "unpin-map", false, "Unpins the map and exits")
-	flag.StringVar(&ip, "ip", "", "IP address to add (required for add mode)")
+	flag.StringVar(&ifname, "iface", "", "Network interface name (required for add mode)")
+	flag.StringVar(&mac, "mac", "", "MAC address to add (required for add mode)")
 	flag.UintVar(&tcHandle, "tc-handle", 0, "TC handle value (required for add mode)")
 	flag.UintVar(&bandwidthMbps, "bandwidth", 0, "Bandwidth in Mbps (required for add mode)")
 	flag.UintVar(&delayMs, "delay", 0, "Delay in ms (required for add mode)")
@@ -134,7 +169,7 @@ func main() {
 	flag.Parse()
 
 	// Path to the map file of the eBPF program
-	ebpfMapFile := "/sys/fs/bpf/IP_HANDLE_BPS_DELAY"
+	ebpfMapFile := "/sys/fs/bpf/MAC_HANDLE_BPS_DELAY"
 
 	// Load map
 	ipHandleMap, err := ebpf.LoadPinnedMap(ebpfMapFile, &ebpf.LoadPinOptions{})
@@ -174,16 +209,16 @@ func main() {
 		
 	case "add":
 		// 验证添加模式所需的参数
-		if ip == "" || tcHandle == 0 || bandwidthMbps == 0 || delayMs == 0 {
-			fmt.Println("错误: 添加模式需要提供以下参数: -ip, -tc-handle, -bandwidth, -delay")
-			fmt.Println("用法示例: sudo go run main.go -mode add -ip 192.168.1.1 -tc-handle 100 -bandwidth 10 -delay 50")
+		if ifname == "" || mac == "" || tcHandle == 0 || bandwidthMbps == 0 || delayMs == 0 {
+			fmt.Println("错误: 添加模式需要提供以下参数: -iface, -mac, -tc-handle, -bandwidth, -delay")
+			fmt.Println("用法示例: sudo go run main.go -mode add -iface eth0 -mac 00:11:22:33:44:55 -tc-handle 100 -bandwidth 10 -delay 50")
 			os.Exit(1)
 		}
 		
 		// 转换带宽从Mbps到Bps
 		throttleRateBps := bandwidthMbps * 1000000
 		
-		if err := addMapEntry(ipHandleMap, ip, uint32(tcHandle), uint32(throttleRateBps), uint32(delayMs)); err != nil {
+		if err := addMapEntry(ipHandleMap, ifname, mac, uint32(tcHandle), uint32(throttleRateBps), uint32(delayMs)); err != nil {
 			fmt.Printf("错误: 添加表条目失败: %v\n", err)
 			os.Exit(1)
 		}
@@ -193,7 +228,7 @@ func main() {
 		fmt.Println("用法示例:")
 		fmt.Println("  查看表: sudo go run main.go -mode view")
 		fmt.Println("  清空表: sudo go run main.go -mode clear")
-		fmt.Println("  添加表: sudo go run main.go -mode add -ip 192.168.1.1 -tc-handle 100 -bandwidth 10 -delay 50")
+		fmt.Println("  添加表: sudo go run main.go -mode add -iface eth0 -mac 00:11:22:33:44:55 -tc-handle 100 -bandwidth 10 -delay 50")
 		os.Exit(1)
 	}
 }
