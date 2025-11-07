@@ -22,17 +22,22 @@ var (
 )
 
 func init() {
-	iface_name = flag.String("iface", "veth928be55", "Network interface to attach eBPF program to")
-	clear_flag = flag.Bool("clear", false, "Clear eBPF program and TC components from the interface")
+	iface_name = flag.String("iface", "", "目标网卡接口名称，用于挂载或清理eBPF程序")
+	clear_flag = flag.Bool("clear", false, "清理指定网卡接口上的eBPF程序和TC组件")
 }
 
 func main() {
 	flag.Parse()
 
+	// 检查是否指定了网卡接口
+	if *iface_name == "" {
+		log.Fatalf("错误: 必须使用 -iface 参数指定目标网卡接口名称")
+	}
+
 	// 获取网络接口
 	iface, err := utils.GetIface(*iface_name)
 	if err != nil {
-		log.Fatalf("cannot find %s: %v", *iface_name, err)
+		log.Fatalf("错误: 找不到指定的网卡接口 %s: %v\n请使用 -iface 参数指定正确的网卡名称", *iface_name, err)
 	}
 
 	// 检查是否只需要清理

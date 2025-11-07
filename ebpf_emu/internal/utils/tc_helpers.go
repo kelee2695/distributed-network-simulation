@@ -10,7 +10,6 @@ import (
 func GetIface(name string) (netlink.Link, error) {
 	iface, err := netlink.LinkByName(name)
 	if err != nil {
-		log.Fatalf("cannot find %s: %v", name, err)
 		return nil, err
 	}
 	return iface, nil
