@@ -17,7 +17,7 @@ type Subscriber struct {
 }
 
 type KeyEvent struct {
-    EventType string    `json:"event_type"` // set, del, expired
+    EventType string    `json:"event_type"`
     Key       string    `json:"key"`
     Value     string    `json:"value,omitempty"`
     Timestamp time.Time `json:"timestamp"`
