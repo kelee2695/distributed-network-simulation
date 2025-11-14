@@ -1,0 +1,21 @@
+app:
+  name: "redis_listener"
+  log_level: "info"  # debug, info, warn, error
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+  # 监听的键事件模式
+  key_patterns:
+    - "__keyevent@*__:set"
+    - "__keyevent@*__:del"
+  # 只处理特定前缀的键（可选，为空则处理所有）
+  key_prefixes:
+  #    - "xnet:"
+
+
+server:
+  max_retries: 3
+  retry_interval_seconds: 5
+  shutdown_timeout_seconds: 30
