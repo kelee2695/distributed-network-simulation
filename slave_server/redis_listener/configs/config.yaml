@@ -3,6 +3,7 @@ app:
   log_level: "info"  # debug, info, warn, error
 
 redis:
+  # 主节点IP地址
   addr: "localhost:6379"
   password: ""
   db: 0
